@@ -22,11 +22,11 @@ func TestFormat(t *testing.T) {
 
 	formatAndCheck := func(c *qt.C, numIterations int, unformatted string, expect interface{}, options ...Option) {
 		for i := 0; i < numIterations; i++ {
-			// fmt.Println("________ Round", i)
 			f := New(options...)
-			// fmt.Println(i, "\n_____\n", unformatted, "\n__________________________")
 			var b bytes.Buffer
+
 			err := f.Format(&b, strings.NewReader(unformatted))
+
 			shouldFail, ok := expect.(bool)
 			if ok {
 				if shouldFail {
@@ -38,11 +38,9 @@ func TestFormat(t *testing.T) {
 			}
 
 			c.Assert(err, qt.IsNil)
+
 			actual := b.String()
-			// fmt.Println(actual)
 			formatted := expect.(string)
-			// fmt.Println("vs____\n", formatted)
-			//			c.Assert(actual, qt.Equals, formatted, qt.Commentf("[%d]\n%s", i, strings.ReplaceAll(actual, "  ", "%")+"\n____\nexpected:\n"+strings.ReplaceAll(formatted, "  ", "%")))
 
 			c.Assert(actual, qt.Equals, formatted, qt.Commentf("[%d]\n%s", i, actual+"\n____\nexpected:\n"+formatted))
 
@@ -84,6 +82,7 @@ func TestFormat(t *testing.T) {
 		formatAndCheck(c, 2, "<div><p>AAA</p></div>", "<div>\n  <p>AAA</p>\n</div>")
 		formatAndCheck(c, 2, "<code>  <div>    Hello     </div>  </code>", "<code>  <div>    Hello     </div>  </code>")
 		formatAndCheck(c, 2, "<!-- comment1 --><!-- comment2 -->", "<!-- comment1 -->\n<!-- comment2 -->")
+		formatAndCheck(c, 2, `<div class="foo" id="bar"></div>`, `<div class="foo" id="bar"></div>`)
 	})
 
 	c.Run("Custom text formatter", func(c *qt.C) {
@@ -104,15 +103,12 @@ func TestFormat(t *testing.T) {
 
 	c.Run("Text elements", func(c *qt.C) {
 		formatAndCheck(c, 2, "<div>Hello <span>World</span>s</div>", "<div>Hello <span>World</span>s</div>")
-
 		formatAndCheck(c, 2, "w3\n<br>", "w3\n<br>")
-
 		formatAndCheck(c, 2, "<div></div>\nw3", "<div></div>\nw3")
 		formatAndCheck(c, 2, fmt.Sprintf("<div>%s</div>", longTextWithoutNewlines), fmt.Sprintf("<div>\n  %s\n</div>", longTextWithoutNewlines))
 		formatAndCheck(c, 2, "<br>\nw3", "<br>\nw3")
 		formatAndCheck(c, 2, "Hello <span>World</span> and then.", "Hello <span>World</span> and then.")
 		formatAndCheck(c, 2, "Hello\n<span>World</span>\nand then.", "Hello <span>World</span> and then.")
-
 		formatAndCheck(c, 2, fmt.Sprintf("<div><span>%s</span></div>", longTextWithoutNewlines), "<div>\n  <span>\n    a bbaa bbaa bbaa bbaa bbaa bbaa bbaa bbaa bbaa bbaa bbaa bba\n  </span>\n</div>")
 		formatAndCheck(c, 2, fmt.Sprintf("<div>%s</div>", longTextWithNewlines), "<div>\n  a bbaa bbaa bbaa bbaa bba\n  a bbaa bbaa bbaa bbaa bba\n  a bbaa bbaa bbaa bbaa bba\n</div>")
 	})
@@ -145,7 +141,7 @@ func TestFormatTextBlock(t *testing.T) {
 	c.Assert(f("\n          foo\n          bar", 1), qt.Equals, "\n%foo\n%bar")
 }
 
-var benchmarkHTML = `<!DOCTYPE html><html><head><title>This is a title.</title></head><body><p>Line1<br>` + longTextWithNewlines + `</p><br/></body></html> <!-- aaa -->`
+var benchmarkHTML = `<!DOCTYPE html><html><head><title class="foo">This is a title.</title></head><body><p>Line1<br>` + longTextWithNewlines + `</p><br/></body></html> <!-- aaa -->`
 
 func BenchmarkFormat(b *testing.B) {
 	f := New()

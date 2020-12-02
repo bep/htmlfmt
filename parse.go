@@ -9,17 +9,23 @@ import (
 	"golang.org/x/net/html"
 )
 
-func newParser(src io.Reader) *parser {
+func newParser(src io.Reader, tab []byte) *parser {
+	if tab == nil {
+		tab = []byte("  ")
+	}
 	return &parser{
-		//f:              f,
-		i:     -1,
-		depth: 0,
-		// newlineTracker: newlineTracker,
+		tab:       tab,
+		i:         -1,
+		depth:     0,
 		Tokenizer: html.NewTokenizer(src),
 	}
 }
 
 type parser struct {
+	// Configuration
+	tab []byte
+
+	// Parser state.
 	counter int
 
 	tokens tokens
@@ -40,26 +46,26 @@ type parser struct {
 // Want to avoid nesting of short elements such as <div><span>Hello</span></div>.
 // This is hard to determine without looking ahead, so we first read the tokens
 // we received from html.Tokenizer into a structure with that information.
-func (tok *parser) parse() (tokens, error) {
+func (prs *parser) parse() (tokens, error) {
 Loop:
 	for {
-		tok.Next()
+		prs.Next()
 
 		var depthAdjustment int
 		var inPre bool
 
-		switch tok.currType {
+		switch prs.currType {
 		case html.StartTagToken:
-			if !(inPre || isVoid(tok.tagName)) {
+			if !(inPre || isVoid(string(prs.tagName))) {
 				depthAdjustment = 1
 			}
 
-			if !inPre && isPreformatted(tok.tagName) {
+			if !inPre && isPreformatted(prs.tagName) {
 				inPre = true
 			}
 
 		case html.EndTagToken:
-			isEndPre := inPre && isPreformatted(tok.tagName)
+			isEndPre := inPre && isPreformatted(prs.tagName)
 			if !isEndPre {
 				depthAdjustment = -1
 			} else {
@@ -67,60 +73,59 @@ Loop:
 			}
 
 		case html.ErrorToken:
-			err := tok.Err()
+			err := prs.Err()
 			if err.Error() == "EOF" {
 				break Loop
 			}
 			return nil, err
 		}
 
-		tok.trackOpen(depthAdjustment, inPre)
+		prs.trackOpen(depthAdjustment, inPre)
 
 	}
 
-	return tok.tokens, nil
+	return prs.tokens, nil
 }
 
-func (tok *parser) trackOpen(depthAdjustment int, inPre bool) {
-	if tok.currType == html.ErrorToken {
-		return
+func (prs *parser) trackOpen(depthAdjustment int, inPre bool) {
+	raw := make([]byte, len(prs.Raw()))
+	copy(raw, prs.Raw())
+
+	t := &token{
+		i:        prs.counter,
+		inPre:    inPre,
+		typ:      prs.currType,
+		prevType: prs.prevType,
+		raw:      raw,
+		tag:      prs.tag,
+		closed:   prs.currType == html.EndTagToken,
 	}
 
-	if tok.currType == html.EndTagToken {
-		tok.depth += depthAdjustment
-	} else {
+	switch prs.currType {
+	case html.EndTagToken:
+		prs.depth += depthAdjustment
+	case html.TextToken:
+		t.text = prepareText(t.raw, prs.tab)
+		fallthrough
+	default:
 		defer func() {
-			tok.depth += depthAdjustment
+			prs.depth += depthAdjustment
 		}()
 	}
 
-	raw := make([]byte, len(tok.Raw()))
-	copy(raw, tok.Raw())
-
-	t := &token{
-		i:        tok.counter,
-		inPre:    inPre,
-		typ:      tok.currType,
-		prevType: tok.prevType,
-		raw:      raw,
-		depth:    tok.depth,
-		tagName:  string(tok.tagName),
-		tag:      tok.tag,
-		closed:   tok.currType == html.EndTagToken,
-	}
-
-	tok.counter++
+	t.depth = prs.depth
+	prs.counter++
 
 	if t.closed && !t.inPre {
 		// Attach the start element to the end, if possible.
-		for i := len(tok.tokens) - 1; i >= 0; i-- {
-			tt := tok.tokens[i]
+		for i := len(prs.tokens) - 1; i >= 0; i-- {
+			tt := prs.tokens[i]
 
-			if tt.closed || t.tagName != tt.tagName || t.typ <= tt.typ || tt.typ == html.TextToken {
+			if tt.closed || t.tag.Name != tt.tag.Name || t.typ <= tt.typ || tt.typ == html.TextToken {
 				continue
 			}
 
-			if tt != t && tt.depth == t.depth && t.tagName == tt.tagName {
+			if tt != t && tt.depth == t.depth && t.tag.Name == tt.tag.Name {
 				t.startElement = tt
 				tt.closed = t.closed
 				break
@@ -128,8 +133,8 @@ func (tok *parser) trackOpen(depthAdjustment int, inPre bool) {
 		}
 	}
 
-	for i := len(tok.tokens) - 1; i >= 0; i-- {
-		tt := tok.tokens[i]
+	for i := len(prs.tokens) - 1; i >= 0; i-- {
+		tt := prs.tokens[i]
 
 		if tt == t || tt.closed {
 			continue
@@ -141,16 +146,21 @@ func (tok *parser) trackOpen(depthAdjustment int, inPre bool) {
 		}
 	}
 
-	tok.tokens = append(tok.tokens, t)
+	prs.tokens = append(prs.tokens, t)
 }
 
 type text struct {
 	b                  []byte
 	hasNewline         bool
+	isWhitespaceOnly   bool
 	hadLeadingNewline  bool
 	hadTrailingNewline bool
 	hadLeadingSpace    bool
 	hadTralingSpace    bool
+}
+
+func (t text) IsZero() bool {
+	return t.b == nil
 }
 
 type token struct {
@@ -160,7 +170,6 @@ type token struct {
 	typ      html.TokenType
 	prevType html.TokenType
 	raw      []byte
-	tagName  string
 
 	tag Tag
 
@@ -177,7 +186,7 @@ type token struct {
 
 	// formatter state
 	indented bool
-	text     *text // For text tokens
+	text     text // For text tokens
 }
 
 func (t *token) isStartIndented() bool {
@@ -185,22 +194,18 @@ func (t *token) isStartIndented() bool {
 }
 
 func (t *token) isInline() bool {
-	return isInline([]byte(t.tagName))
+	return isInline(t.tag.Name)
 }
 
 func (t *token) isBlock() bool {
 	return !(t.isInline() || t.typ == html.TextToken)
 }
 
-func (t *token) isTextWithOnlyWhitespace() bool {
-	return t.typ == html.TextToken && !nonSpaceRe.Match(t.raw)
-}
-
 func (t *token) isVoid() bool {
-	return isVoid([]byte(t.tagName))
+	return isVoid(t.tag.Name)
 }
 
-func (t *token) needsNewlineAppended(tabStr []byte) bool {
+func (t *token) needsNewlineAppended() bool {
 	if t.inPre {
 		return false
 	}
@@ -209,7 +214,7 @@ func (t *token) needsNewlineAppended(tabStr []byte) bool {
 		return false
 	}
 
-	if shouldAlwaysHaveNewlineAppended([]byte(t.tagName)) {
+	if shouldAlwaysHaveNewlineAppended(t.tag.Name) {
 		return true
 	}
 
@@ -217,7 +222,7 @@ func (t *token) needsNewlineAppended(tabStr []byte) bool {
 	for _, c := range t.children {
 		if c.typ == html.StartTagToken && !c.isInline() {
 			blockCount++
-		} else if c.typ == html.TextToken && c.text.hasNewline {
+		} else if c.text.hasNewline {
 			blockCount++
 		}
 		if blockCount > 0 {
@@ -234,7 +239,7 @@ func (t *token) needsNewlineAppended(tabStr []byte) bool {
 func (t *token) size() int {
 	t.sizeBytesInit.Do(func() {
 		s := 0
-		if !t.isTextWithOnlyWhitespace() {
+		if !t.text.isWhitespaceOnly {
 			s = len(t.raw)
 		}
 
@@ -303,7 +308,7 @@ func (t tokens) String() string {
 	var sb strings.Builder
 	sb.WriteString("START:")
 	for _, tok := range t {
-		sb.WriteString(fmt.Sprintf("typ(%s)-tag(%s)-%d[depth(%d)|children(%d)|size(%d)]", tok.typ, tok.tagName, tok.i, tok.depth, len(tok.children), tok.size()))
+		sb.WriteString(fmt.Sprintf("typ(%s)-tag(%s)-%d[depth(%d)|children(%d)|size(%d)]", tok.typ, tok.tag.Name, tok.i, tok.depth, len(tok.children), tok.size()))
 		if tok.startElement != nil {
 			sb.WriteString(fmt.Sprintf("/%d", tok.startElement.i))
 		}
@@ -316,11 +321,11 @@ func (t tokens) String() string {
 }
 
 func (t *token) String() string {
-	return fmt.Sprintf("%s/%s(%d)", t.tagName, t.typ, t.depth)
+	return fmt.Sprintf("%s/%s(%d)", t.tag.Name, t.typ, t.depth)
 }
 
-func isInline(tag []byte) bool {
-	switch string(tag) {
+func isInline(tag string) bool {
+	switch tag {
 	case "a", "b", "i", "em", "strong", "code", "span", "ins",
 		"big", "small", "tt", "abbr", "acronym", "cite", "dfn",
 		"kbd", "samp", "var", "bdo", "map", "q", "sub", "sup":
@@ -339,7 +344,7 @@ func isPreformatted(tag []byte) bool {
 	}
 }
 
-func isVoid(tag []byte) bool {
+func isVoid(tag string) bool {
 	switch string(tag) {
 	case "input", "link", "meta", "hr", "img", "br", "area", "base", "col",
 		"param", "command", "embed", "keygen", "source", "track", "wbr":
@@ -350,8 +355,8 @@ func isVoid(tag []byte) bool {
 }
 
 // Even for very short examples, we would not want these on one line.
-func shouldAlwaysHaveNewlineAppended(tag []byte) bool {
-	switch string(tag) {
+func shouldAlwaysHaveNewlineAppended(tag string) bool {
+	switch tag {
 	case "html", "body":
 		return true
 	default:

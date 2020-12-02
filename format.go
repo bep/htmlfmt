@@ -99,17 +99,11 @@ type Formatter struct {
 
 // Format formats src and writes the result to dst.
 func (f *Formatter) Format(dst io.Writer, src io.Reader) error {
-	p := newParser(src)
+	p := newParser(src, f.tabStr)
 
 	tokens, err := p.parse()
 	if err != nil {
 		return err
-	}
-
-	for _, tok := range tokens {
-		if tok.typ == html.TextToken {
-			tok.text = prepareText(tok.raw, f.tabStr)
-		}
 	}
 
 	iter := &tokenIterator{
@@ -141,8 +135,7 @@ func (f *Formatter) Format(dst io.Writer, src io.Reader) error {
 		prev := iter.Prev()
 		next := iter.Peek()
 
-		if curr.typ == html.TextToken && !nonSpaceRe.Match(curr.raw) {
-			// Whitespace only.
+		if curr.text.isWhitespaceOnly {
 			if prev == nil && leadingNewlineRe.Match(curr.raw) {
 				// Preserve one leading newline.
 				w.newline()
@@ -189,11 +182,10 @@ func (f *Formatter) Format(dst io.Writer, src io.Reader) error {
 			var needsNewlineAppended bool
 
 			if formatText == nil {
-				needsNewlineAppended = curr.needsNewlineAppended(f.tabStr)
+				needsNewlineAppended = curr.needsNewlineAppended()
 				if needsNewlineAppended {
 					curr.indented = true
 					w.depth++
-					w.debug("depth.incr")
 				} else if prev != nil && next != nil && curr.isVoid() {
 					if w.newline() {
 						w.tab()
@@ -225,7 +217,6 @@ func (f *Formatter) Format(dst io.Writer, src io.Reader) error {
 				if curr.isStartIndented() {
 					n := w.newline()
 					w.depth--
-					w.debug("depth.decr")
 					if w.depth < 0 {
 						w.depth = 0
 					}
@@ -341,18 +332,21 @@ type writer struct {
 	// For development.
 	enableDebug bool
 
-	depth        int // TODO1 usage
+	depth        int
 	newlineDepth int
 }
 
-func prepareText(inTxt, tabStr []byte) *text {
+func prepareText(inTxt, tabStr []byte) text {
 	txt := bytes.Replace(inTxt, []byte{'\t'}, tabStr, -1)
-	txt = bytes.Trim(txt, " \r\n")
+	txt = bytes.TrimFunc(txt, func(r rune) bool {
+		return r == ' ' || r == '\r' || r == '\n'
+	})
 	hasNewline := bytes.Contains(txt, []byte{'\n'})
 
-	return &text{
+	return text{
 		b:                  txt,
 		hasNewline:         hasNewline,
+		isWhitespaceOnly:   !nonSpaceRe.Match(inTxt),
 		hadLeadingNewline:  leadingNewlineRe.Match(inTxt),
 		hadTrailingNewline: trailingNewlineRe.Match(inTxt),
 		hadLeadingSpace:    leadingSpaceRe.Match(inTxt),
@@ -397,10 +391,8 @@ func (w *writer) handleTextToken(prev, curr, next *token) {
 }
 
 func (w *writer) debug(what string) {
-	if w.enableDebug {
-		curr := w.iter.Current()
-		fmt.Printf("%s(%s/%s)(%d/%d)\n", what, curr.tagName, curr.typ, w.depth, w.newlineDepth)
-	}
+	curr := w.iter.Current()
+	fmt.Printf("%s(%s/%s)(%d/%d)\n", what, curr.tag.Name, curr.typ, w.depth, w.newlineDepth)
 }
 
 var regexpCache = struct {
@@ -457,18 +449,24 @@ func (w *writer) newline() bool {
 	if w.newlineDepth > 1 {
 		return false
 	}
-	w.debug("newline")
+	if w.enableDebug {
+		w.debug("newline")
+	}
 	w.mustWrite(w.f.newline)
 	return true
 }
 
 func (w *writer) newlineForced() {
-	w.debug("newlineForced")
+	if w.enableDebug {
+		w.debug("newlineForced")
+	}
 	w.mustWrite(w.f.newline)
 }
 
 func (w *writer) tab() {
-	w.debug(fmt.Sprintf("tab(%d)", w.depth))
+	if w.enableDebug {
+		w.debug(fmt.Sprintf("tab(%d)", w.depth))
+	}
 	w.mustWrite(bytes.Repeat(w.f.tabStr, w.depth))
 }
 

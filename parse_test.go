@@ -13,7 +13,7 @@ func TestParse(t *testing.T) {
 
 	pc := func(c *qt.C, input string, matches ...string) {
 		c.Helper()
-		p := newParser(strings.NewReader(input))
+		p := newParser(strings.NewReader(input), nil)
 		tok, err := p.parse()
 
 		c.Assert(err, qt.IsNil)
